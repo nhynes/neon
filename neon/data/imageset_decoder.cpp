@@ -24,6 +24,7 @@
 #include <chrono>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
 #include <thread> // for threading
 
 #define MAXTHREADS 24
@@ -233,6 +234,9 @@ int ImagesetWorker::process_next_minibatch(unsigned char* outdata)
 
 void ImagesetWorker::decode_img_list(uchar* pixbuffer, uint start, uint end)
 {
+    RNG rng = theRNG();
+    rng.state = time(0);
+
     /*Args explained
         pixbuffer: this points right into the buffer that we want to fill
     */
@@ -255,6 +259,44 @@ void ImagesetWorker::decode_img_list(uchar* pixbuffer, uint start, uint end)
         //optionally flip the image
         if (_flip && (rand_r(&(_rseed)) % 2 == 0))
             flip(croppedImage, croppedImage, 1);
+
+        // Color noise
+        uint NOISE_SDEV = rand_r(&(_rseed)) % 10;
+        Mat noise(croppedImage.size(), CV_16SC3);
+        randn(noise, 0, NOISE_SDEV);
+        rng.fill(noise, RNG::NORMAL, 0, NOISE_SDEV);
+        add(croppedImage, noise, croppedImage, noArray(), CV_8UC3);
+
+        // Gaussian blur
+        uint MAX_BLUR_RADIUS = 4;
+        uint blur_x = 2*(rand_r(&(_rseed)) % MAX_BLUR_RADIUS) + 1;
+        uint blur_y = 2*(rand_r(&(_rseed)) % MAX_BLUR_RADIUS) + 1;
+        GaussianBlur(croppedImage, croppedImage, Size(blur_x, blur_y), 0);
+
+        // Hue + brightness
+        uint MAX_COLOR_ADJUST = rand_r(&(_rseed)) % 30 + 1;
+        Scalar color_adjust(rand_r(&(_rseed)) % MAX_COLOR_ADJUST,
+                            rand_r(&(_rseed)) % MAX_COLOR_ADJUST,
+                            rand_r(&(_rseed)) % MAX_COLOR_ADJUST);
+        uint rs = rand_r(&(_rseed)) & 0xffff;
+        double r = rs / (3.0*0xffff);
+        croppedImage = croppedImage * (5/6.0 + r) + color_adjust;
+
+        // Grayscale
+        if(rand_r(&(_rseed)) % 4 == 0) {
+            cvtColor(croppedImage, croppedImage, CV_RGB2GRAY);
+            cvtColor(croppedImage, croppedImage, CV_GRAY2RGB);
+        }
+
+        // Perspective (stupid version)
+        if(rand_r(&(_rseed)) % 4 == 0) {
+            double PERSP_SHIFT = 0.0002;
+            Mat persp = Mat::eye(3, 3, CV_64F);
+            Mat perspNoise(3, 3, CV_64F);
+            rng.fill(perspNoise, RNG::NORMAL, 0, PERSP_SHIFT);
+            persp += perspNoise;
+            warpPerspective(croppedImage, croppedImage, persp, croppedImage.size());
+        }
 
         //split the color channels before writing image to memory
         auto channel_size = (_npixels_out * sizeof(uchar) ) / 3;
