@@ -17,6 +17,7 @@ import logging
 from neon import NervanaObject
 from neon.backends import Autodiff
 from neon.backends.backend import Tensor
+from neon.initializers import Constant
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -675,7 +676,7 @@ class PReLU(ParameterLayer):
     .. [He2015] http://arxiv.org/abs/1502.01852
     """
 
-    def __init__(self, init, name="PReLULayer"):
+    def __init__(self, init=Constant(0.25), name="PReLULayer"):
         super(PReLU, self).__init__(init, name)
         self.y = None
         self.owns_output = False
@@ -686,29 +687,32 @@ class PReLU(ParameterLayer):
             layer_string = "PReLU Layer '%s': size %d x (%dx%d)" % (
                 self.name, self.in_shape[0], self.in_shape[1], self.in_shape[2])
         else:
-            layer_string = "PReLU Layer '%s': size %d" % (self.name, self.bias_size)
+            layer_string = "PReLU Layer '%s': size %d" % (self.name, self.num_channels)
         return layer_string
 
     def configure(self, in_obj):
         super(PReLU, self).configure(in_obj)
         self.out_shape = self.in_shape
-        self.num_units = self.in_shape[0]
+        self.num_channels = self.in_shape[0]
         if self.weight_shape is None:
-            self.weight_shape = (self.num_units, 1)
+            self.weight_shape = (self.num_channels, 1)
         return self
 
     def fprop(self, inputs, inference=False):
         self.outputs = self.inputs = inputs
         if self.y is None or self.y.base is not self.outputs:
-            self.y = self.outputs.reshape((self.num_units, -1))
+            self.y = self.outputs.reshape((self.num_channels, -1))
+        # f1 = 0.5 * (1 + self.W)
+        # f2 = 0.5 * (1 - self.W)
+        # self.y[:] = f1 * self.y + f2 * self.be.abs(self.y, 0)
         self.y[:] = self.be.maximum(self.y, 0) + self.be.minimum(self.y, 0) * self.W
         return self.outputs
 
     def bprop(self, error):
         if self.deltas is None:
             self.deltas = error.reshape(self.y.shape)
-        self.deltas = self.deltas * self.be.less(self.outputs, 0)
-        self.be.sum(self.deltas, axis=1, out=self.dW)
+        self.be.sum(self.deltas * self.be.minimum(self.y, 0), axis=1, out=self.dW)
+        self.deltas[:] = self.deltas * (self.be.greater(self.y, 0) + self.be.less(self.y, 0) * self.W)
         return error
 
 
@@ -862,10 +866,10 @@ class Affine(list):
                  act_name='ActivationLayer'):
         list.__init__(self)
         self.append(Linear(nout, init, bsum=batch_norm, name=linear_name))
-        self.add_postfilter_layers(bias, batch_norm, activation, bias_name, act_name)
+        self.add_postfilter_layers(bias, batch_norm, activation, bias_name, act_name, prelu=prelu)
 
     def add_postfilter_layers(self, bias=None, batch_norm=False, activation=None,
-                              bias_name='BiasLayer', act_name='ActivationLayer'):
+                              bias_name='BiasLayer', act_name='ActivationLayer', prelu=False):
         if batch_norm and (bias is not None):
             raise AttributeError('Batchnorm and bias cannot be combined')
         if bias is not None:
@@ -876,7 +880,7 @@ class Affine(list):
             self.append(Activation(transform=activation, name=act_name))
         if prelu and (activation is not None):
             raise AttributeError('PReLU and Activation cannot be combined')
-        if prelu is not None:
+        if prelu:
             self.append(PReLU())
 
 
@@ -908,12 +912,12 @@ class Conv(Affine):
     """
 
     def __init__(self, fshape, init, strides={}, padding={}, bias=None, batch_norm=False,
-                 activation=None, conv_name='ConvolutionLayer',
+                 activation=None, prelu=False, conv_name='ConvolutionLayer',
                  bias_name='BiasLayer', act_name='ActivationLayer'):
         list.__init__(self)
         self.append(Convolution(fshape=fshape, strides=strides, padding=padding,
                                 init=init, bsum=batch_norm, name=conv_name))
-        self.add_postfilter_layers(bias, batch_norm, activation, bias_name, act_name)
+        self.add_postfilter_layers(bias, batch_norm, activation, bias_name, act_name, prelu=prelu)
 
 
 class Deconv(Affine):
