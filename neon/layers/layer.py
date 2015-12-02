@@ -665,6 +665,52 @@ class Linear(ParameterLayer):
         self.be.compound_dot(A=error, B=self.inputs.T, C=self.dW)
         return self.deltas
 
+class PReLU(ParameterLayer):
+
+    """
+    Applies the PReLU activation, as described in [He2015]
+
+    Notes:
+
+    .. [He2015] http://arxiv.org/abs/1502.01852
+    """
+
+    def __init__(self, init, name="PReLULayer"):
+        super(PReLU, self).__init__(init, name)
+        self.y = None
+        self.owns_output = False
+        self.owns_delta = False
+
+    def __str__(self):
+        if len(self.in_shape) == 3:
+            layer_string = "PReLU Layer '%s': size %d x (%dx%d)" % (
+                self.name, self.in_shape[0], self.in_shape[1], self.in_shape[2])
+        else:
+            layer_string = "PReLU Layer '%s': size %d" % (self.name, self.bias_size)
+        return layer_string
+
+    def configure(self, in_obj):
+        super(PReLU, self).configure(in_obj)
+        self.out_shape = self.in_shape
+        self.num_units = self.in_shape[0]
+        if self.weight_shape is None:
+            self.weight_shape = (self.num_units, 1)
+        return self
+
+    def fprop(self, inputs, inference=False):
+        self.outputs = self.inputs = inputs
+        if self.y is None or self.y.base is not self.outputs:
+            self.y = self.outputs.reshape((self.num_units, -1))
+        self.y[:] = self.be.maximum(self.y, 0) + self.be.minimum(self.y, 0) * self.W
+        return self.outputs
+
+    def bprop(self, error):
+        if self.deltas is None:
+            self.deltas = error.reshape(self.y.shape)
+        self.deltas = self.deltas * self.be.less(self.outputs, 0)
+        self.be.sum(self.deltas, axis=1, out=self.dW)
+        return error
+
 
 class Bias(ParameterLayer):
 
@@ -811,6 +857,7 @@ class Affine(list):
     """
 
     def __init__(self, nout, init, bias=None, batch_norm=False, activation=None,
+                 prelu=False,
                  linear_name='LinearLayer', bias_name='BiasLayer',
                  act_name='ActivationLayer'):
         list.__init__(self)
@@ -827,6 +874,10 @@ class Affine(list):
             self.append(BatchNorm())
         if activation is not None:
             self.append(Activation(transform=activation, name=act_name))
+        if prelu and (activation is not None):
+            raise AttributeError('PReLU and Activation cannot be combined')
+        if prelu is not None:
+            self.append(PReLU())
 
 
 class Conv(Affine):
